@@ -1,0 +1,11 @@
+[project]
+name = "your-project-name"
+version = "0.1.0"
+description = ""
+dependencies = [
+    "cffi>=2.0.0",
+    "gymnasium>=0.29.1",
+    "pufferlib>=3.0.0",
+    "pyray>=0.1.0",
+    "raylib==5.5.0.3",
+]
