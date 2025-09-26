@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Game of Life — Rule Only</title>
+    <style>
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system;
+        background: #081a1a;
+        color: #cfe;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 12px;
+      }
+      #controls {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      button,
+      select,
+      input[type="number"],
+      input[type="range"] {
+        padding: 6px 10px;
+        background: #0f2c2c;
+        color: #9f9;
+        border: 1px solid #1f4;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      label {
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+      }
+      canvas {
+        image-rendering: pixelated;
+        border: 1px solid #133;
+        background: #061515;
+      }
+      .stat {
+        margin-left: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>🧬 Game of Life — Rule Only</h3>
+    <div id="controls">
+      <button id="btnPlay">Play</button>
+      <button id="btnStep">Step</button>
+      <button id="btnBlank">Blank</button>
+      <button id="btnRandom">Random</button>
+      <label
+        >Rule
+        <select id="rule"></select>
+      </label>
+      <label>W<input id="width" type="number" min="8" max="256" value="64" /></label>
+      <label>H<input id="height" type="number" min="8" max="256" value="64" /></label>
+      <label>Density<input id="density" type="range" min="0" max="1" step="0.01" value="0.3" /></label>
+      <label>Speed<input id="speed" type="range" min="1" max="60" step="1" value="20" /></label>
+      <span id="stat" class="stat"></span>
+    </div>
+    <canvas id="cv" width="640" height="640"></canvas>
+
+    <script>
+      const RULES = {
+        Conway: { birth: [3], survival: [2, 3] },
+        HighLife: { birth: [3, 6], survival: [2, 3] },
+        Seeds: { birth: [2], survival: [] },
+        Coral: { birth: [3], survival: [4, 5, 6, 7, 8] },
+        Maze: { birth: [3], survival: [1, 2, 3, 4, 5] },
+        Replicator: { birth: [1, 3, 5, 7], survival: [1, 3, 5, 7] },
+        DayNight: { birth: [3, 6, 7, 8], survival: [3, 4, 6, 7, 8] },
+      };
+
+      const cv = document.getElementById("cv");
+      const ctx = cv.getContext("2d");
+      const selRule = document.getElementById("rule");
+      const btnPlay = document.getElementById("btnPlay");
+      const btnStep = document.getElementById("btnStep");
+      const btnBlank = document.getElementById("btnBlank");
+      const btnRandom = document.getElementById("btnRandom");
+      const stat = document.getElementById("stat");
+      const widthEl = document.getElementById("width");
+      const heightEl = document.getElementById("height");
+      const densityEl = document.getElementById("density");
+      const speedEl = document.getElementById("speed");
+
+      selRule.innerHTML = Object.keys(RULES)
+        .map((r) => `<option>${r}</option>`)
+        .join("");
+      selRule.value = "Conway";
+
+      let W = parseInt(widthEl.value, 10);
+      let H = parseInt(heightEl.value, 10);
+      let grid = zeros(H, W);
+      let tmp = zeros(H, W);
+      let generation = 0;
+      let playing = false;
+      let mouseDown = false;
+      let drawValue = 1; // 1 to draw, 0 to erase
+
+      function zeros(h, w) {
+        const a = new Array(h);
+        for (let i = 0; i < h; i++) {
+          a[i] = new Uint8Array(w);
+        }
+        return a;
+      }
+
+      function randomize(density) {
+        for (let i = 0; i < H; i++) {
+          for (let j = 0; j < W; j++) {
+            grid[i][j] = Math.random() < density ? 1 : 0;
+          }
+        }
+        generation = 0;
+      }
+
+      function blank() {
+        for (let i = 0; i < H; i++) grid[i].fill(0);
+        generation = 0;
+      }
+
+      function setSize(newH, newW) {
+        H = newH;
+        W = newW;
+        grid = zeros(H, W);
+        tmp = zeros(H, W);
+        randomize(parseFloat(densityEl.value));
+      }
+
+      function evolve() {
+        const rule = RULES[selRule.value];
+        const B = maskFromList(rule.birth);
+        const S = maskFromList(rule.survival);
+        for (let i = 0; i < H; i++) {
+          for (let j = 0; j < W; j++) {
+            let n = 0;
+            for (let di = -1; di <= 1; di++) {
+              for (let dj = -1; dj <= 1; dj++) {
+                if (di === 0 && dj === 0) continue;
+                const ii = i + di,
+                  jj = j + dj;
+                if (ii >= 0 && ii < H && jj >= 0 && jj < W) {
+                  n += grid[ii][jj];
+                }
+              }
+            }
+            if (grid[i][j] === 1) {
+              tmp[i][j] = S[n] ? 1 : 0;
+            } else {
+              tmp[i][j] = B[n] ? 1 : 0;
+            }
+          }
+        }
+        const sw = grid;
+        grid = tmp;
+        tmp = sw;
+        generation++;
+      }
+
+      function maskFromList(list) {
+        const m = Array(9).fill(0);
+        for (const k of list) {
+          if (k >= 0 && k <= 8) m[k] = 1;
+        }
+        return m;
+      }
+
+      function render() {
+        const cell = Math.floor(Math.min(cv.width / W, cv.height / H));
+        ctx.clearRect(0, 0, cv.width, cv.height);
+        ctx.fillStyle = "#0a2";
+        let live = 0;
+        for (let i = 0; i < H; i++) {
+          for (let j = 0; j < W; j++) {
+            if (grid[i][j]) {
+              live++;
+              ctx.fillRect(j * cell, i * cell, cell, cell);
+            }
+          }
+        }
+        stat.textContent = `rule=${selRule.value} gen=${generation} live=${live}`;
+      }
+
+      function canvasToCell(e) {
+        const rect = cv.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const cell = Math.floor(Math.min(cv.width / W, cv.height / H));
+        const j = Math.floor(x / cell);
+        const i = Math.floor(y / cell);
+        return { i, j };
+      }
+
+      // Mouse draw/erase
+      cv.addEventListener("mousedown", (e) => {
+        mouseDown = true;
+        const { i, j } = canvasToCell(e);
+        if (i >= 0 && i < H && j >= 0 && j < W) {
+          drawValue = grid[i][j] ? 0 : 1; // toggle behavior on drag start
+          grid[i][j] = drawValue;
+          render();
+        }
+      });
+      cv.addEventListener("mousemove", (e) => {
+        if (!mouseDown) return;
+        const { i, j } = canvasToCell(e);
+        if (i >= 0 && i < H && j >= 0 && j < W) {
+          grid[i][j] = drawValue;
+          render();
+        }
+      });
+      window.addEventListener("mouseup", () => {
+        mouseDown = false;
+      });
+
+      // Controls
+      btnPlay.onclick = () => {
+        playing = !playing;
+        btnPlay.textContent = playing ? "Pause" : "Play";
+      };
+      btnStep.onclick = () => {
+        evolve();
+        render();
+      };
+      btnBlank.onclick = () => {
+        blank();
+        render();
+      };
+      btnRandom.onclick = () => {
+        randomize(parseFloat(densityEl.value));
+        render();
+      };
+      widthEl.onchange = () => setSize(parseInt(widthEl.value, 10), W);
+      heightEl.onchange = () => setSize((H = parseInt(heightEl.value, 10)), W);
+
+      // Init
+      randomize(parseFloat(densityEl.value));
+      render();
+
+      // Main loop
+      let last = 0;
+      function loop(ts) {
+        const fps = parseInt(speedEl.value, 10);
+        const interval = 1000 / fps;
+        if (playing && ts - last >= interval) {
+          last = ts;
+          evolve();
+          render();
+        }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    </script>
+  </body>
+</html>
