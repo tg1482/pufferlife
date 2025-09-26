@@ -61,10 +61,12 @@ class GameOfLifePufferEnv(pufferlib.PufferEnv):
         height=128,
         rule_name="Conway",
         density=0.3,
-        max_steps=1_000_000,
+        max_steps=10_000_000,
         render_mode="human",
         buf=None,
         seed=0,
+        rl_mode: str = "rule",  # "rule" (user-chosen fixed rule) or "learn" (agent learns masks)
+        reward_mode: str = "default",  # "default" or "stability_entropy"
     ):
 
         self.width = width
@@ -79,17 +81,29 @@ class GameOfLifePufferEnv(pufferlib.PufferEnv):
         self.auto_step_interval = 5
         self.paused = False
         self.draw_mode = False
+        self.rl_mode = rl_mode
+        self.reward_mode = reward_mode
 
         # Observation: flattened grid + rule info + stats
         obs_size = width * height + 8  # grid + rule params + stats
         self.single_observation_space = gymnasium.spaces.Box(
-            low=0, high=8, shape=(obs_size,), dtype=np.uint8
+            low=0, high=255, shape=(obs_size,), dtype=np.uint8
         )
 
-        # Actions: toggle cell, change rule, reset, step
-        self.single_action_space = gymnasium.spaces.Discrete(
-            width * height + len(RULES) + 3
-        )
+        # Actions
+        if self.rl_mode == "learn":
+            # 18 binary decisions (9 for birth, 9 for survival)
+            self.single_action_space = gymnasium.spaces.MultiDiscrete([2] * 18)
+            # initialize with Conway
+            self.learn_birth_mask = np.zeros(9, dtype=np.uint8)
+            self.learn_survival_mask = np.zeros(9, dtype=np.uint8)
+            for b in [3]:
+                self.learn_birth_mask[b] = 1
+            for s in [2, 3]:
+                self.learn_survival_mask[s] = 1
+        else:
+            # "rule" mode: agent does nothing; rule is chosen externally/user. Single no-op action.
+            self.single_action_space = gymnasium.spaces.Discrete(1)
 
         self.num_agents = num_envs
         super().__init__(buf)
@@ -100,6 +114,11 @@ class GameOfLifePufferEnv(pufferlib.PufferEnv):
         self.rule_indices = np.zeros(num_envs, dtype=np.int32)
         self.generations = np.zeros(num_envs, dtype=np.int32)
         self.live_counts = np.zeros(num_envs, dtype=np.int32)
+
+        # Map rule names to indices and set initial index
+        rule_name_to_index = {name: idx for idx, name in enumerate(RULES.keys())}
+        initial_idx = rule_name_to_index.get(rule_name, 0)
+        self.rule_indices[:] = initial_idx
 
         # Initialize renderer if in human mode
         self.renderer = None
@@ -137,29 +156,22 @@ class GameOfLifePufferEnv(pufferlib.PufferEnv):
 
     def step(self, actions):
         for i, action in enumerate(actions):
-            if action < self.width * self.height:
-                # Toggle cell
-                row = action // self.width
-                col = action % self.width
-                self.grids[i, row, col] = 1 - self.grids[i, row, col]
-            elif action < self.width * self.height + len(RULES):
-                # Change rule
-                rule_idx = action - (self.width * self.height)
-                self.rule_indices[i] = rule_idx
-                self.current_rule = list(RULES.values())[rule_idx]
-            elif action == self.width * self.height + len(RULES):
-                # Reset grid
-                self.grids[i] = np.random.choice(
-                    [0, 1],
-                    size=(self.height, self.width),
-                    p=[1 - self.density, self.density],
-                ).astype(np.uint8)
-                self.generations[i] = 0
-            elif action == self.width * self.height + len(RULES) + 1:
-                # Single step evolution
-                self.grids[i] = self._evolve_grid(self.grids[i])
-                self.generations[i] += 1
-            # action + 2 is no-op
+            if self.rl_mode == "learn":
+                # Expect action as length-18 vector of 0/1
+                a = np.asarray(action).astype(np.int32)
+                birth_mask = a[:9]
+                survival_mask = a[9:18]
+                self.learn_birth_mask = birth_mask
+                self.learn_survival_mask = survival_mask
+                # Update current rule for display/info
+                birth_list = [k for k in range(9) if birth_mask[k] == 1]
+                survival_list = [k for k in range(9) if survival_mask[k] == 1]
+                self.current_rule = GameOfLifeRule(
+                    name="Learned",
+                    birth=birth_list,
+                    survival=survival_list,
+                    color=(170, 85, 255),
+                )
 
         # Auto-evolve every few steps for natural progression
         if (not self.paused) and (
@@ -173,8 +185,11 @@ class GameOfLifePufferEnv(pufferlib.PufferEnv):
 
         self.step_count += 1
 
-        # Calculate rewards based on interesting patterns
-        self._calculate_rewards()
+        # Calculate rewards based on selected mode
+        if self.reward_mode == "stability_entropy":
+            self._calculate_rewards_stability_entropy()
+        else:
+            self._calculate_rewards()
 
         # Episode termination
         terminated = (
@@ -209,12 +224,21 @@ class GameOfLifePufferEnv(pufferlib.PufferEnv):
                 # Count neighbors
                 neighbors = np.sum(padded[i - 1 : i + 2, j - 1 : j + 2]) - padded[i, j]
 
-                if padded[i, j] == 1:  # Alive cell
-                    if neighbors in self.current_rule.survival:
-                        new_grid[i - 1, j - 1] = 1
-                else:  # Dead cell
-                    if neighbors in self.current_rule.birth:
-                        new_grid[i - 1, j - 1] = 1
+                if self.rl_mode == "learn":
+                    # Use learned masks
+                    if padded[i, j] == 1:  # Alive cell
+                        if self.learn_survival_mask[neighbors] == 1:
+                            new_grid[i - 1, j - 1] = 1
+                    else:  # Dead cell
+                        if self.learn_birth_mask[neighbors] == 1:
+                            new_grid[i - 1, j - 1] = 1
+                else:
+                    if padded[i, j] == 1:  # Alive cell
+                        if neighbors in self.current_rule.survival:
+                            new_grid[i - 1, j - 1] = 1
+                    else:  # Dead cell
+                        if neighbors in self.current_rule.birth:
+                            new_grid[i - 1, j - 1] = 1
 
         return new_grid
 
@@ -244,6 +268,78 @@ class GameOfLifePufferEnv(pufferlib.PufferEnv):
                 reward += 0.1
 
             self.rewards[i] = reward
+
+    def _calculate_rewards_stability_entropy(self):
+        eps = 1e-8
+        N = self.width * self.height
+        for i in range(self.num_agents):
+            grid = self.grids[i]
+            prev = self.prev_grids[i]
+            alive = np.sum(grid)
+            alive_frac = alive / N
+            change_rate = np.count_nonzero(grid ^ prev) / N
+            p1 = alive_frac
+            p0 = 1.0 - p1
+            H_global = -(p0 * np.log2(p0 + eps) + p1 * np.log2(p1 + eps))
+
+            # Lightweight block entropy approximation (3x3 neighborhoods)
+            padded = np.pad(grid, 1, mode="constant")
+            counts = np.zeros(512, dtype=np.int32)
+            for r in range(1, padded.shape[0] - 1):
+                for c in range(1, padded.shape[1] - 1):
+                    block = padded[r - 1 : r + 2, c - 1 : c + 2]
+                    idx = 0
+                    bit = 1
+                    # little-endian bit pack of 3x3
+                    for br in range(3):
+                        for bc in range(3):
+                            if block[br, bc]:
+                                idx |= bit
+                            bit <<= 1
+                    counts[idx] += 1
+            hist = counts / np.maximum(1, counts.sum())
+            H_block = -np.sum(hist * np.log2(hist + eps))
+
+            # Clustering proxy 1: edge agreement ratio (4-neighborhood)
+            vert_same = (grid[1:, :] == grid[:-1, :]).sum()
+            horz_same = (grid[:, 1:] == grid[:, :-1]).sum()
+            total_edges = (self.height - 1) * self.width + self.height * (
+                self.width - 1
+            )
+            cluster_edges = (vert_same + horz_same) / max(1, total_edges)
+
+            # Clustering proxy 2: mean alive neighbors (8-neighborhood), normalized
+            if alive > 0:
+                P = np.zeros((self.height + 2, self.width + 2), dtype=np.uint8)
+                P[1:-1, 1:-1] = grid
+                neigh = (
+                    P[0:-2, 0:-2]
+                    + P[0:-2, 1:-1]
+                    + P[0:-2, 2:]
+                    + P[1:-1, 0:-2]
+                    + P[1:-1, 2:]
+                    + P[2:, 0:-2]
+                    + P[2:, 1:-1]
+                    + P[2:, 2:]
+                )
+                alive_neigh_mean = (
+                    float(neigh[grid == 1].mean()) if (grid == 1).any() else 0.0
+                )
+                cluster_alive = alive_neigh_mean / 8.0
+            else:
+                cluster_alive = 0.0
+
+            # Target density around 50%
+            density_term = 1.0 - abs(alive_frac - 0.5) / 0.5  # in [0,1], peak at 0.5
+
+            # Compose reward
+            reward = 0.0
+            reward += 0.4 * density_term
+            reward += 0.3 * (1.0 - change_rate)  # stability
+            reward += 0.2 * cluster_edges
+            reward += 0.1 * cluster_alive
+            reward -= 0.25 * (H_block / 9.0)  # discourage high local entropy
+            self.rewards[i] = float(reward)
 
     def _update_observations(self):
         """Update observation space with grid + metadata"""
@@ -455,14 +551,14 @@ if __name__ == "__main__":
 
     try:
         while True:
-            # Mostly no-op actions, let auto-evolution handle progression
-            actions = [len(RULES) + 2]  # No-op action
+            # Single valid action in 'rule' mode is no-op (index 0)
+            actions = [0]
 
-            # Occasionally inject some randomness
-            if step % 100 == 0:
-                actions = [
-                    np.random.randint(0, env.driver_env.width * env.driver_env.height)
-                ]
+            # # Occasionally inject some randomness
+            # if step % 100 == 0:
+            #     actions = [
+            #         np.random.randint(0, env.driver_env.width * env.driver_env.height)
+            #     ]
 
             observations, rewards, terminals, truncations, infos = env.step(actions)
 
